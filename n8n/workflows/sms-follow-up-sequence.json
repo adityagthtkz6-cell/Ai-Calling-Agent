@@ -1,0 +1,162 @@
+{
+  "name": "Voice Intelligence — SMS Follow-Up Sequence",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sms-follow-up",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "sms-webhook-trigger",
+      "name": "SMS Follow-Up Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "sms-follow-up"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"received\": true }",
+        "options": {}
+      },
+      "id": "sms-200",
+      "name": "Return 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [460, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\n\n// Touch message templates per touch number\nconst templates = {\n  1: `Hi {{caller_name}}! Thanks for calling {{business_name}}. We'd love to help with {{service_interest}}. Reply here or call us back anytime!`,\n  2: `Hi {{caller_name}}, just following up from {{business_name}}. Still interested in {{service_interest}}? We have availability this week — reply or call us!`,\n  3: `{{caller_name}}, a quick note from {{business_name}} — our team is ready to help you with {{service_interest}}. Any questions I can answer?`,\n  4: `Hi {{caller_name}}, last follow-up from {{business_name}}. When you're ready to move forward with {{service_interest}}, we're here. Reply anytime.`,\n  5: `Final note from {{business_name}}: We're here whenever you're ready, {{caller_name}}. Take care and don't hesitate to reach out!`\n};\n\nconst touch = body.touch_number || 1;\nlet message = templates[touch] || templates[1];\n\n// Replace template variables\nmessage = message\n  .replace(/{{caller_name}}/g, body.caller_name || 'there')\n  .replace(/{{business_name}}/g, body.client_name || 'our team')\n  .replace(/{{service_interest}}/g, body.service_interest || 'your inquiry');\n\nreturn [{ json: { ...body, message, touch_number: touch } }];"
+      },
+      "id": "build-message",
+      "name": "Build Personalized SMS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 380]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.opted_out }}",
+              "operation": "equal",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "check-opted-out",
+      "name": "Opted Out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 380]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "create",
+        "from": "={{ $env.TWILIO_PHONE_NUMBER }}",
+        "to": "={{ $json.caller_number }}",
+        "body": "={{ $json.message }}"
+      },
+      "id": "send-sms",
+      "name": "Send SMS via Twilio",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [900, 280],
+      "credentials": {
+        "twilioApi": {
+          "id": "twilio-creds",
+          "name": "Twilio"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.APP_BASE_URL }}/api/n8n/lead-update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.INGEST_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ client_id: $json.client_id, lead_id: $json.lead_id, follow_up_touch: { touch_number: $json.touch_number, status: 'sent', sent_at: new Date().toISOString(), message_body: $json.message }, idempotency_key: 'sms:' + $json.lead_id + ':touch' + $json.touch_number }) }}",
+        "options": {}
+      },
+      "id": "log-sent",
+      "name": "Log SMS Sent to Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 280]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.APP_BASE_URL }}/api/n8n/lead-update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.INGEST_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ client_id: $json.client_id, lead_id: $json.lead_id, follow_up_touch: { touch_number: $json.touch_number, status: 'opted_out', sent_at: new Date().toISOString() }, idempotency_key: 'optout:' + $json.lead_id }) }}",
+        "options": {}
+      },
+      "id": "log-opted-out",
+      "name": "Log Opt-Out to Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 500]
+    }
+  ],
+  "connections": {
+    "SMS Follow-Up Trigger": {
+      "main": [
+        [
+          { "node": "Return 200", "type": "main", "index": 0 },
+          { "node": "Build Personalized SMS", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build Personalized SMS": {
+      "main": [
+        [{ "node": "Opted Out?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Opted Out?": {
+      "main": [
+        [{ "node": "Log Opt-Out to Supabase", "type": "main", "index": 0 }],
+        [{ "node": "Send SMS via Twilio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send SMS via Twilio": {
+      "main": [
+        [{ "node": "Log SMS Sent to Supabase", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": ["voice-intelligence", "sms", "follow-up"],
+  "meta": {
+    "description": "Personalized 5-touch SMS sequence. Touch 1 sent immediately post-call. Touches 2–5 scheduled at 1h, 24h, 72h, 7d. Opt-out check before every send. All sends logged to follow_up_sequences table.",
+    "version": "1.0.0"
+  }
+}

@@ -1,0 +1,267 @@
+{
+  "name": "Voice Intelligence — Post-Call Orchestrator",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "retell-post-call",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Retell Post-Call Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "retell-post-call"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ received: true }) }}",
+        "options": {}
+      },
+      "id": "immediate-200",
+      "name": "Return 200 Immediately",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [460, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Idempotency check — failure mode #2 mitigation\n// Validate required fields and extract payload\nconst body = $input.first().json.body || $input.first().json;\n\nconst required = ['client_id', 'call_id', 'caller_number', 'outcome'];\nfor (const field of required) {\n  if (!body[field]) {\n    throw new Error(`Missing required field: ${field}`);\n  }\n}\n\n// Build idempotency key\nconst idempotencyKey = `postcall:${body.client_id}:${body.call_id}`;\n\nreturn [{\n  json: {\n    ...body,\n    idempotency_key: idempotencyKey,\n    processed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "validate-payload",
+      "name": "Validate + Build Idempotency Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 380]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.outcome }}",
+              "operation": "equal",
+              "value2": "spam"
+            }
+          ]
+        }
+      },
+      "id": "check-spam",
+      "name": "Is Spam?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.APP_BASE_URL }}/api/n8n/lead-update",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.INGEST_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ client_id: $json.client_id, lead_id: $json.lead_id, status: 'spam', intent: 'spam', qualifier_score: 0, idempotency_key: $json.idempotency_key + ':spam-log' }) }}",
+        "options": {}
+      },
+      "id": "log-spam",
+      "name": "Log Spam Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 240]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.APP_BASE_URL }}/api/n8n/lead-update",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.INGEST_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ client_id: $json.client_id, lead_id: $json.lead_id, status: 'new', intent: $json.outcome === 'qualified' ? 'inquiry' : $json.outcome, idempotency_key: $json.idempotency_key + ':lead-update' }) }}",
+        "options": {}
+      },
+      "id": "update-lead",
+      "name": "Update Lead in Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 420]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.outcome }}",
+              "operation": "equal",
+              "value2": "qualified"
+            }
+          ]
+        }
+      },
+      "id": "check-qualified",
+      "name": "Is Qualified Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1120, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWILIO_WEBHOOK_URL || $env.APP_BASE_URL + '/api/sms/send' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.INGEST_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ client_id: $json.client_id, lead_id: $json.lead_id, to: $json.caller_number, touch_number: 1, message: 'Hi! Thanks for calling ' + ($json.client_name || 'us') + '. We\\'d love to help — reply here or call us back anytime. – ' + ($json.client_name || 'The Team') }) }}",
+        "options": {}
+      },
+      "id": "send-touch-1",
+      "name": "Send SMS Touch 1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 320]
+    },
+    {
+      "parameters": {
+        "webhookUri": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "text": "=📞 *New Qualified Lead* — {{ $json.client_name }}\n*Caller:* {{ $json.caller_number }}\n*Outcome:* {{ $json.outcome }}\n*Duration:* {{ $json.duration_seconds }}s\n*Time:* {{ $json.timestamp }}\n_Lead ID: {{ $json.lead_id }}_",
+        "otherOptions": {}
+      },
+      "id": "slack-alert",
+      "name": "Slack Alert to Owner",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [1340, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Schedule follow-up touches 2–5 at increasing intervals\n// Touch 2: 1 hour | Touch 3: 24 hours | Touch 4: 72 hours | Touch 5: 7 days\nconst schedule = [\n  { touch: 2, delay_hours: 1 },\n  { touch: 3, delay_hours: 24 },\n  { touch: 4, delay_hours: 72 },\n  { touch: 5, delay_hours: 168 }\n];\n\nconst base = $input.first().json;\nreturn schedule.map(s => ({\n  json: {\n    ...base,\n    touch_number: s.touch,\n    scheduled_at: new Date(Date.now() + s.delay_hours * 3600000).toISOString()\n  }\n}));"
+      },
+      "id": "schedule-follow-ups",
+      "name": "Schedule Follow-Up Touches 2–5",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.APP_BASE_URL }}/api/n8n/lead-update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.INGEST_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ client_id: $json.client_id, lead_id: $json.lead_id, schedule_follow_up: { touch_number: $json.touch_number, scheduled_at: $json.scheduled_at, channel: 'sms' }, idempotency_key: 'schedule:' + $json.lead_id + ':touch' + $json.touch_number }) }}",
+        "options": {}
+      },
+      "id": "write-follow-up-schedule",
+      "name": "Write Follow-Up Schedule to Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1780, 320]
+    },
+    {
+      "parameters": {
+        "webhookUri": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "text": "=⚠️ *Webhook Error* — Post-call processing failed\n*Error:* {{ $json.error?.message || JSON.stringify($json) }}\n*Call ID:* {{ $json.call_id }}\n*Client:* {{ $json.client_id }}",
+        "otherOptions": {}
+      },
+      "id": "error-slack-alert",
+      "name": "Dead Letter — Slack Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [900, 600]
+    }
+  ],
+  "connections": {
+    "Retell Post-Call Webhook": {
+      "main": [
+        [
+          { "node": "Return 200 Immediately", "type": "main", "index": 0 },
+          { "node": "Validate + Build Idempotency Key", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Validate + Build Idempotency Key": {
+      "main": [
+        [{ "node": "Is Spam?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is Spam?": {
+      "main": [
+        [{ "node": "Log Spam Lead", "type": "main", "index": 0 }],
+        [{ "node": "Update Lead in Supabase", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Lead in Supabase": {
+      "main": [
+        [{ "node": "Is Qualified Lead?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is Qualified Lead?": {
+      "main": [
+        [
+          { "node": "Send SMS Touch 1", "type": "main", "index": 0 },
+          { "node": "Slack Alert to Owner", "type": "main", "index": 0 }
+        ],
+        []
+      ]
+    },
+    "Send SMS Touch 1": {
+      "main": [
+        [{ "node": "Schedule Follow-Up Touches 2–5", "type": "main", "index": 0 }]
+      ]
+    },
+    "Schedule Follow-Up Touches 2–5": {
+      "main": [
+        [{ "node": "Write Follow-Up Schedule to Supabase", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": null,
+  "tags": ["voice-intelligence", "post-call", "production"],
+  "meta": {
+    "description": "Triggered by Retell post-call webhook. Returns 200 immediately, then: validates payload, routes by outcome (spam/qualified/voicemail), writes lead, sends Touch 1 SMS, Slack-alerts owner, schedules follow-up touches 2–5.",
+    "version": "1.0.0"
+  }
+}
